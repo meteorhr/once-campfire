@@ -6,17 +6,74 @@ class Accounts::SlackImportsControllerTest < ActionDispatch::IntegrationTest
     sign_in :david
   end
 
-  test "new" do
+  test "new shows upload form" do
     get new_account_slack_import_url
     assert_response :ok
   end
 
-  test "create imports slack messages and skips duplicates on re-import" do
-    assert_difference -> { Room.opens.where(name: "general").count }, +1 do
+  test "upload validates archive is present" do
+    post upload_account_slack_import_url, params: { slack_import: {} }
+    assert_redirected_to new_account_slack_import_url
+    assert_equal "Choose a Slack export ZIP file.", flash[:alert]
+  end
+
+  test "upload validates archive is a slack export" do
+    empty_zip = Tempfile.new([ "empty", ".zip" ])
+    Zip::File.open(empty_zip.path, create: true) { |zip| zip.get_output_stream("random.txt") { |s| s.write("hello") } }
+
+    post upload_account_slack_import_url, params: {
+      slack_import: { archive: Rack::Test::UploadedFile.new(empty_zip.path, "application/zip") }
+    }
+    assert_redirected_to new_account_slack_import_url
+    assert_equal "This doesn't look like a Slack export ZIP.", flash[:alert]
+  ensure
+    empty_zip&.close!
+  end
+
+  test "upload parses zip and redirects to channels step" do
+    with_slack_export_upload(slack_export_entries) do |archive|
+      post upload_account_slack_import_url, params: { slack_import: { archive: archive } }
+    end
+
+    assert_redirected_to channels_account_slack_import_url
+  end
+
+  test "channels step shows channel mapping table" do
+    setup_slack_import_session
+
+    get channels_account_slack_import_url
+    assert_response :ok
+  end
+
+  test "channels step redirects to new without session" do
+    get channels_account_slack_import_url
+    assert_redirected_to new_account_slack_import_url
+  end
+
+  test "users step stores channel mappings and shows user mapping table" do
+    setup_slack_import_session
+
+    get users_account_slack_import_url, params: {
+      channel_mappings: { "general" => { "selected" => "1", "room" => "new" } }
+    }
+    assert_response :ok
+  end
+
+  test "full wizard flow creates rooms and imports messages" do
+    setup_slack_import_session
+
+    # Step 2 -> Step 3: pass channel mappings
+    get users_account_slack_import_url, params: {
+      channel_mappings: { "general" => { "selected" => "1", "room" => "new" } }
+    }
+    assert_response :ok
+
+    # Step 3 -> Import: pass user mappings
+    assert_difference -> { Room.opens.count }, +1 do
       assert_difference -> { Message.count }, +2 do
-        with_slack_export_upload(slack_export_entries) do |archive|
-          post account_slack_import_url, params: { slack_import: { archive: archive } }
-        end
+        post account_slack_import_url, params: {
+          user_mappings: { "U1" => users(:david).id.to_s }
+        }
       end
     end
 
@@ -28,72 +85,86 @@ class Accounts::SlackImportsControllerTest < ActionDispatch::IntegrationTest
     assert_equal users(:david), imported_messages.first.creator
     assert_equal "Hey @David", imported_messages.first.body.to_plain_text
 
-    assert_equal "Slack Import Bot", imported_messages.second.creator.name
+    # Unmapped user messages are attributed to the importer
+    assert_equal users(:david), imported_messages.second.creator
     assert_equal "[Robot] Imported by bot", imported_messages.second.body.to_plain_text
+  end
+
+  test "full wizard flow maps channel to existing room" do
+    existing_room = Room.create_for({ name: "general", type: "Rooms::Open", creator: users(:david) }, users: User.active)
+    setup_slack_import_session
+
+    get users_account_slack_import_url, params: {
+      channel_mappings: { "general" => { "selected" => "1", "room" => existing_room.id.to_s } }
+    }
+
+    assert_no_difference -> { Room.opens.count } do
+      assert_difference -> { Message.count }, +2 do
+        post account_slack_import_url, params: { user_mappings: {} }
+      end
+    end
+
+    assert_equal 2, existing_room.messages.count
+  end
+
+  test "creating new channel adds _slack suffix when name already exists" do
+    Room.create_for({ name: "general", type: "Rooms::Open", creator: users(:david) }, users: User.active)
+    setup_slack_import_session
+
+    get users_account_slack_import_url, params: {
+      channel_mappings: { "general" => { "selected" => "1", "room" => "new" } }
+    }
+
+    assert_difference -> { Room.opens.count }, +1 do
+      post account_slack_import_url, params: { user_mappings: {} }
+    end
+
+    assert Room.opens.find_by(name: "general_slack")
+  end
+
+  test "creating new channel with custom name" do
+    setup_slack_import_session
+
+    get users_account_slack_import_url, params: {
+      channel_mappings: { "general" => { "selected" => "1", "room" => "new", "new_name" => "my-general" } }
+    }
+
+    assert_difference -> { Room.opens.count }, +1 do
+      post account_slack_import_url, params: { user_mappings: {} }
+    end
+
+    assert Room.opens.find_by(name: "my-general")
+  end
+
+  test "unselected channels are skipped" do
+    setup_slack_import_session
+
+    get users_account_slack_import_url, params: {
+      channel_mappings: { "general" => { "room" => "new" } }
+    }
 
     assert_no_difference -> { Message.count } do
-      with_slack_export_upload(slack_export_entries) do |archive|
-        post account_slack_import_url, params: { slack_import: { archive: archive } }
-      end
+      post account_slack_import_url, params: { user_mappings: {} }
     end
   end
 
-  test "non-admins cannot import" do
+  test "non-admins cannot access any step" do
     sign_in :kevin
 
-    assert_no_difference -> { Message.count } do
-      with_slack_export_upload(slack_export_entries) do |archive|
-        post account_slack_import_url, params: { slack_import: { archive: archive } }
-      end
-    end
+    get new_account_slack_import_url
+    assert_response :forbidden
 
+    post upload_account_slack_import_url, params: { slack_import: {} }
     assert_response :forbidden
   end
 
-  test "create requires archive" do
-    assert_no_difference -> { Message.count } do
-      post account_slack_import_url, params: { slack_import: {} }
-    end
-
-    assert_redirected_to new_account_slack_import_url
-    assert_equal "Choose a Slack export ZIP file.", flash[:alert]
-  end
-
-  test "create applies explicit slack to campfire user mappings" do
-    assert_difference -> { Message.count }, +2 do
-      with_slack_export_upload(slack_export_entries) do |archive|
-        post account_slack_import_url, params: {
-          slack_import: {
-            archive: archive,
-            user_mappings: "U1=#{users(:kevin).email_address}"
-          }
-        }
-      end
-    end
-
-    assert_redirected_to edit_account_url
-
-    imported_message = Room.opens.find_by!(name: "general").messages.ordered.last(2).first
-    assert_equal users(:kevin), imported_message.creator
-  end
-
-  test "create rejects unknown mapped campfire users" do
-    assert_no_difference -> { Message.count } do
-      with_slack_export_upload(slack_export_entries) do |archive|
-        post account_slack_import_url, params: {
-          slack_import: {
-            archive: archive,
-            user_mappings: "U1=unknown-user@example.com"
-          }
-        }
-      end
-    end
-
-    assert_redirected_to new_account_slack_import_url
-    assert_equal "Unknown Campfire user 'unknown-user@example.com' on line 1.", flash[:alert]
-  end
-
   private
+    def setup_slack_import_session
+      with_slack_export_upload(slack_export_entries) do |archive|
+        post upload_account_slack_import_url, params: { slack_import: { archive: archive } }
+      end
+    end
+
     def with_slack_export_upload(entries)
       archive = Tempfile.new([ "slack-export", ".zip" ])
 

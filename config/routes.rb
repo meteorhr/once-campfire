@@ -22,7 +22,11 @@ Rails.application.routes.draw do
       resource :join_code, only: :create
       resource :logo, only: %i[ show destroy ]
       resource :custom_styles, only: %i[ edit update ]
-      resource :slack_import, only: %i[ new create ]
+      resource :slack_import, only: %i[ new create ] do
+        post :upload
+        get :channels
+        get :users
+      end
     end
   end
 

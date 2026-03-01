@@ -1,0 +1,71 @@
+<% @page_title = "Import from Slack — Channels" %>
+
+<% content_for :nav do %>
+  <div class="flex-item-justify-start">
+    <%= link_back_to new_account_slack_import_path %>
+  </div>
+<% end %>
+
+<section class="panel panel--wide flex flex-column gap" style="view-transition-name: slack-import">
+  <h1 class="margin-none txt-align-center">Map channels</h1>
+  <p class="margin-none txt-align-center txt-subtle">
+    Select Slack channels to import and map them to Campfire rooms.
+  </p>
+
+  <%= form_with url: users_account_slack_import_path, method: :get, class: "flex flex-column gap", data: { controller: "check-all" } do %>
+    <div class="overflow-x-auto">
+      <table style="width: 100%; border-collapse: collapse;">
+        <thead>
+          <tr>
+            <th style="width: 3em; padding: 0.5em; text-align: center;">
+              <input type="checkbox" checked
+                     data-check-all-target="checkAll"
+                     data-action="change->check-all#toggleAll">
+            </th>
+            <th style="padding: 0.5em; text-align: left;">Slack channel</th>
+            <th style="padding: 0.5em; text-align: left;">Campfire room</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% @slack_channels.each do |channel| %>
+            <% channel_name = channel["name"] %>
+            <% existing_room = @campfire_rooms.find { |r| r.name.downcase == channel_name.downcase } %>
+            <tr style="border-top: 1px solid var(--color-border);" data-controller="channel-mapping">
+              <td style="padding: 0.5em; text-align: center;">
+                <input type="checkbox" name="channel_mappings[<%= channel_name %>][selected]" value="1" checked
+                       data-check-all-target="checkbox"
+                       data-action="change->check-all#updateCheckAll">
+              </td>
+              <td style="padding: 0.5em;">
+                <strong>#<%= channel_name %></strong>
+              </td>
+              <td style="padding: 0.5em;">
+                <div class="flex flex-column gap-half">
+                  <select name="channel_mappings[<%= channel_name %>][room]" class="input"
+                          data-channel-mapping-target="select"
+                          data-action="change->channel-mapping#toggle">
+                    <option value="new">Create as new channel</option>
+                    <% @campfire_rooms.each do |room| %>
+                      <option value="<%= room.id %>" <%= "selected" if existing_room == room %>>
+                        <%= room.name %>
+                      </option>
+                    <% end %>
+                  </select>
+                  <input type="text" name="channel_mappings[<%= channel_name %>][new_name]"
+                         value="<%= channel_name %>" class="input"
+                         placeholder="Channel name"
+                         data-channel-mapping-target="nameInput"
+                         style="<%= "display: none" if existing_room %>">
+                </div>
+              </td>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+
+    <button class="btn btn--reversed center align-center" type="submit">
+      <span>Next</span>
+    </button>
+  <% end %>
+</section>

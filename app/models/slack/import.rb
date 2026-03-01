@@ -10,12 +10,13 @@ class Slack::Import
   class InvalidMappingsError < StandardError; end
 
   MESSAGE_ENTRY_PATTERN = %r{\A(?<channel>[^/]+)/\d{4}-\d{2}-\d{2}\.json\z}
-  IMPORT_BOT_NAME = "Slack Import Bot"
 
-  def initialize(archive:, importer:, user_mappings: nil)
+  def initialize(archive:, importer:, user_mappings: nil, channel_mappings: nil, user_mappings_hash: nil)
     @archive = archive
     @importer = importer
     @user_mappings = user_mappings
+    @channel_mappings = channel_mappings
+    @user_mappings_hash = user_mappings_hash
   end
 
   def call
@@ -27,7 +28,7 @@ class Slack::Import
   end
 
   private
-    attr_reader :archive, :importer, :user_mappings
+    attr_reader :archive, :importer, :user_mappings, :channel_mappings, :user_mappings_hash
 
     def import_from(zip)
       slack_users = parse_optional_json_file(zip, "users.json")
@@ -48,10 +49,11 @@ class Slack::Import
       message_entries_from(zip).each do |entry|
         channel_name = channel_name_from(entry.name)
         next if channel_name.blank?
+        next if skip_channel?(channel_name)
 
         room_key = channel_name.downcase
         room, created_room = room_cache.fetch(room_key) do
-          find_or_create_room(channel_name)
+          resolve_room(channel_name)
         end
         room_cache[room_key] = [ room, false ]
         rooms_created += 1 if created_room
@@ -92,6 +94,37 @@ class Slack::Import
       )
     end
 
+    def skip_channel?(channel_name)
+      return false if channel_mappings.blank?
+
+      mapping = channel_mappings[channel_name]
+      return true unless mapping
+      mapping["selected"] != "1"
+    end
+
+    def resolve_room(channel_name)
+      if channel_mappings.present?
+        mapping = channel_mappings[channel_name]
+        if mapping && mapping["room"] != "new"
+          room = Room.find_by(id: mapping["room"])
+          return [ room, false ] if room
+        end
+
+        custom_name = mapping&.dig("new_name").presence
+        create_room_for_channel(custom_name || channel_name)
+      else
+        find_or_create_room(channel_name)
+      end
+    end
+
+    def create_room_for_channel(room_name)
+      if Room.opens.find_by("LOWER(name) = ?", room_name.downcase)
+        room_name = "#{room_name}_slack"
+      end
+
+      [ Room.create_for({ name: room_name, type: "Rooms::Open", creator: importer }, users: User.active), true ]
+    end
+
     def prepare_messages(entry:, room:, channel_name:, channels_by_id:, users_by_slack_id:)
       raw_messages = parse_json_entry(entry)
       return [] unless raw_messages.is_a?(Array)
@@ -116,8 +149,8 @@ class Slack::Import
       body = normalize_text(raw_message["text"], channels_by_id:, users_by_slack_id:)
       return if body.blank?
 
-      creator, speaker_name = resolve_creator(raw_message, users_by_slack_id:)
-      body = "[#{speaker_name}] #{body}" if creator == import_bot && speaker_name.present?
+      creator, speaker_name, mapped = resolve_creator(raw_message, users_by_slack_id:)
+      body = "[#{speaker_name}] #{body}" if !mapped && speaker_name.present?
 
       {
         body:,
@@ -171,12 +204,22 @@ class Slack::Import
     def resolve_creator(raw_message, users_by_slack_id:)
       slack_user = users_by_slack_id[raw_message["user"]]
       local_user =
+        hash_mapped_user_for(raw_message["user"]) ||
         mapped_user_for(raw_message:, slack_user:) ||
         find_local_user(slack_user) ||
         find_local_user("name" => raw_message["username"])
       speaker_name = display_name_for(slack_user) || raw_message["username"]
 
-      [ local_user || import_bot, speaker_name ]
+      [ local_user || importer, speaker_name, local_user.present? ]
+    end
+
+    def hash_mapped_user_for(slack_user_id)
+      return unless user_mappings_hash.present? && slack_user_id.present?
+
+      campfire_user_id = user_mappings_hash[slack_user_id]
+      return if campfire_user_id.blank?
+
+      users_by_id[campfire_user_id.to_s]
     end
 
     def mapped_user_for(raw_message:, slack_user:)
@@ -280,10 +323,6 @@ class Slack::Import
       users_by_id[normalized_identifier] ||
         users_by_email[normalized_identifier] ||
         users_by_name[normalized_identifier]
-    end
-
-    def import_bot
-      @import_bot ||= User.active_bots.find_by(name: IMPORT_BOT_NAME) || User.create_bot!(name: IMPORT_BOT_NAME)
     end
 
     def message_entries_from(zip)

@@ -1,0 +1,57 @@
+<% @page_title = "Import from Slack — Users" %>
+
+<% content_for :nav do %>
+  <div class="flex-item-justify-start">
+    <%= link_back_to channels_account_slack_import_path %>
+  </div>
+<% end %>
+
+<section class="panel panel--wide flex flex-column gap" style="view-transition-name: slack-import">
+  <h1 class="margin-none txt-align-center">Map users</h1>
+  <p class="margin-none txt-align-center txt-subtle">
+    Map Slack users to existing Campfire users.
+  </p>
+
+  <%= form_with url: account_slack_import_path, method: :post, class: "flex flex-column gap" do %>
+    <div class="overflow-x-auto">
+      <table style="width: 100%; border-collapse: collapse;">
+        <thead>
+          <tr>
+            <th style="padding: 0.5em; text-align: left;">Slack user</th>
+            <th style="padding: 0.5em; text-align: left;">Campfire user</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% @slack_users.each do |slack_user| %>
+            <% display_name = slack_user.dig("profile", "real_name").presence || slack_user["real_name"].presence || slack_user["name"] %>
+            <% email = slack_user.dig("profile", "email") %>
+            <% auto_match = @campfire_users.find { |u| (email.present? && u.email_address&.downcase == email.downcase) || u.name.downcase == display_name.to_s.downcase } %>
+            <tr style="border-top: 1px solid var(--color-border);">
+              <td style="padding: 0.5em;">
+                <strong><%= display_name %></strong>
+                <% if email.present? %>
+                  <br><span class="txt-small txt-subtle"><%= email %></span>
+                <% end %>
+              </td>
+              <td style="padding: 0.5em;">
+                <select name="user_mappings[<%= slack_user["id"] %>]" class="input" style="max-width: 20em;">
+                  <option value="">— Skip —</option>
+                  <% @campfire_users.each do |user| %>
+                    <option value="<%= user.id %>" <%= "selected" if auto_match == user %>>
+                      <%= user.name %> (<%= user.email_address %>)
+                    </option>
+                  <% end %>
+                </select>
+              </td>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+
+    <button class="btn btn--reversed center align-center" type="submit">
+      <%= image_tag "check.svg", aria: { hidden: "true" }, size: 20 %>
+      <span>Import</span>
+    </button>
+  <% end %>
+</section>
