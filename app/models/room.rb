@@ -19,6 +19,7 @@ class Room < ApplicationRecord
 
   has_many :users, through: :memberships
   has_many :messages, dependent: :destroy
+  has_many :e2e_message_envelopes, class_name: "E2e::MessageEnvelope", dependent: :delete_all
 
   belongs_to :creator, class_name: "User", default: -> { Current.user }
 

@@ -11,10 +11,17 @@ module Message::Searchable
 
   private
     def create_in_index
+      return if encrypted?
+
       execute_sql_with_binds "insert into message_search_index(rowid, body) values (?, ?)", id, plain_text_body
     end
 
     def update_in_index
+      if encrypted?
+        remove_from_index
+        return
+      end
+
       execute_sql_with_binds "update message_search_index set body = ? where rowid = ?", plain_text_body, id
     end
 

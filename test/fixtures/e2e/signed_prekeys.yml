@@ -1,0 +1,23 @@
+david_primary:
+  device: david_phone
+  key_id: 1001
+  public_key: david-signed-prekey
+  signature: david-signed-signature
+  published_at: <%= 2.days.ago %>
+  active: true
+
+jason_primary:
+  device: jason_laptop
+  key_id: 2001
+  public_key: jason-signed-prekey
+  signature: jason-signed-signature
+  published_at: <%= 1.day.ago %>
+  active: true
+
+jason_phone_primary:
+  device: jason_phone
+  key_id: 2101
+  public_key: jason-phone-signed-prekey
+  signature: jason-phone-signed-signature
+  published_at: <%= 1.day.ago %>
+  active: true

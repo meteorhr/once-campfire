@@ -31,6 +31,7 @@ module MessagesHelper
         controller: "reply",
         user_id: message.creator_id,
         message_id: message.id,
+        client_message_id: message.client_message_id,
         message_timestamp: message_timestamp_milliseconds,
         message_updated_at: message.updated_at.to_fs(:epoch),
         sort_value: message_timestamp_milliseconds,
@@ -52,6 +53,8 @@ module MessagesHelper
 
   def message_presentation(message)
     case message.content_type
+    when "encrypted"
+      message_encrypted_presentation(message)
     when "attachment"
       message_attachment_presentation(message)
     when "sound"
@@ -92,6 +95,18 @@ module MessagesHelper
 
       tag.div class: "sound", data: { controller: "sound", action: "messages:play->sound#play", sound_url_value: asset_path(sound.asset_path) } do
         play_button + (sound.image ? sound_image_tag(sound.image) : sound.text)
+      end
+    end
+
+    def message_encrypted_presentation(message)
+      payload = message.e2e_payload_hash
+
+      tag.div class: "message__encrypted", data: {
+        controller: "e2e-message",
+        e2e_message_payload_value: payload.to_json,
+        e2e_message_sender_id_value: message.creator_id
+      } do
+        tag.span("Decrypting encrypted message…", class: "pending")
       end
     end
 

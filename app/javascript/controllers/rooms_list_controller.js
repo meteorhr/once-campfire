@@ -4,7 +4,7 @@ import { ignoringBriefDisconnects } from "helpers/dom_helpers"
 
 export default class extends Controller {
   static targets = [ "room" ]
-  static classes = [ "unread" ]
+  static classes = [ "current", "unread" ]
 
   #disconnected = true
 
@@ -24,7 +24,11 @@ export default class extends Controller {
   }
 
   loaded() {
-    this.read({ detail: { roomId: Current.room.id } })
+    this.#markCurrentRoom()
+
+    if (Current.room?.id) {
+      this.read({ detail: { roomId: Current.room.id } })
+    }
   }
 
   read({ detail: { roomId } }) {
@@ -61,5 +65,24 @@ export default class extends Controller {
 
   #findRoomTarget(roomId) {
     return this.roomTargets.find(roomTarget => roomTarget.dataset.roomId == roomId)
+  }
+
+  #markCurrentRoom() {
+    const currentRoomId = Current.room?.id
+
+    for (const roomTarget of this.roomTargets) {
+      roomTarget.classList.remove(this.currentClass)
+      roomTarget.removeAttribute("aria-current")
+    }
+
+    if (!currentRoomId) {
+      return
+    }
+
+    const currentRoom = this.#findRoomTarget(currentRoomId)
+    if (currentRoom) {
+      currentRoom.classList.add(this.currentClass)
+      currentRoom.setAttribute("aria-current", "page")
+    }
   }
 }

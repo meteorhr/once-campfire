@@ -56,6 +56,8 @@
         </div>
 
         <%= form.hidden_field :client_message_id, data: { composer_target: "clientid" } %>
+        <%= form.hidden_field :e2e_algorithm, data: { composer_target: "e2eAlgorithm" } %>
+        <%= form.hidden_field :e2e_payload, data: { composer_target: "e2ePayload" } %>
       <% end %>
     </turbo-frame>
   </div>

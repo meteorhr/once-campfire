@@ -15,6 +15,19 @@ class RoomsControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
   end
 
+  test "show direct room includes phase 2 e2e onboarding endpoints" do
+    room = rooms(:david_and_jason)
+
+    get room_url(room)
+
+    assert_response :success
+    assert_select "form#composer[data-composer-e2e-enabled-value='true']"
+    assert_select "form#composer[data-composer-e2e-device-url-value='#{user_e2e_device_path}']"
+    assert_select "form#composer[data-composer-e2e-peer-user-id-value='#{users(:jason).id}']"
+    assert_select "form#composer[data-composer-e2e-prekey-bundle-url-value='#{user_e2e_prekey_bundle_path(users(:jason), room_id: room.id)}']"
+    assert_select "form#composer[data-composer-e2e-self-prekey-bundle-url-value='#{user_e2e_prekey_bundle_path(user_id: \"me\", room_id: room.id, self_sync: true)}']"
+  end
+
   test "shows records the last room visited in a cookie" do
     get room_url(users(:david).rooms.last)
     assert response.cookies[:last_room] = users(:david).rooms.last.id

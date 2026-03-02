@@ -26,4 +26,24 @@ class Message::SearchableTest < ActiveSupport::TestCase
     assert_equal [], rooms(:designers).messages.search("span")
     assert_equal [ message ], rooms(:designers).messages.search("eel")
   end
+
+  test "encrypted messages are excluded from the search index" do
+    room = rooms(:david_and_jason)
+    room.messages.create!(
+      creator: users(:david),
+      client_message_id: "enc-search",
+      e2e_algorithm: Message::E2E_ALGORITHM,
+      e2e_payload: {
+        "v" => 1,
+        "alg" => Message::E2E_ALGORITHM,
+        "from" => users(:david).id,
+        "to" => users(:jason).id,
+        "c" => 0,
+        "iv" => "aW5pdGlhbHZlY3Rvcg",
+        "ciphertext" => "Y2lwaGVydGV4dA"
+      }
+    )
+
+    assert_equal [], room.messages.search("ciphertext")
+  end
 end

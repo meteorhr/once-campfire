@@ -1,0 +1,17 @@
+david_phone:
+  user: david
+  device_id: dev-david-phone
+  name: David Phone
+  identity_key: david-identity-key
+
+jason_laptop:
+  user: jason
+  device_id: dev-jason-laptop
+  name: Jason Laptop
+  identity_key: jason-identity-key
+
+jason_phone:
+  user: jason
+  device_id: dev-jason-phone
+  name: Jason Phone
+  identity_key: jason-phone-identity-key

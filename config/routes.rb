@@ -43,8 +43,10 @@ Rails.application.routes.draw do
     scope module: "users" do
       resource :avatar, only: %i[ show destroy ]
       resource :ban, only: %i[ create destroy ]
+      resource :e2e_prekey_bundle, only: :show
 
       scope defaults: { user_id: "me" } do
+        resource :e2e_device, only: %i[ show update ]
         resource :sidebar, only: :show
         resource :profile
         resources :push_subscriptions do
@@ -70,6 +72,7 @@ Rails.application.routes.draw do
     post ":bot_key/messages", to: "messages/by_bots#create", as: :bot_messages
 
     scope module: "rooms" do
+      resource :e2e_key_bundle, only: %i[ show update ]
       resource :refresh, only: :show
       resource :settings, only: :show
       resource :involvement, only: %i[ show update ]
