@@ -20,6 +20,7 @@ class Users::E2ePrekeyBundlesController < ApplicationController
         device_id: device.device_id,
         name: device.name,
         identity_key: device.identity_key,
+        signing_key: device.signing_key,
         signed_prekey: {
           key_id: signed_prekey.key_id,
           public_key: signed_prekey.public_key,

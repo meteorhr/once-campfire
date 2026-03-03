@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.2].define(version: 2026_03_01_175000) do
+ActiveRecord::Schema[8.2].define(version: 2026_03_03_010000) do
   create_table "accounts", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.text "custom_styles"
@@ -86,6 +86,7 @@ ActiveRecord::Schema[8.2].define(version: 2026_03_01_175000) do
     t.datetime "last_prekey_uploaded_at"
     t.string "name", null: false
     t.datetime "revoked_at"
+    t.text "signing_key"
     t.datetime "updated_at", null: false
     t.integer "user_id", null: false
     t.index ["user_id", "device_id"], name: "index_e2e_devices_on_user_id_and_device_id", unique: true

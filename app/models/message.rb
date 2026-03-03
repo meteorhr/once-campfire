@@ -1,7 +1,9 @@
 class Message < ApplicationRecord
   include Attachment, Broadcasts, Mentionee, Pagination, Searchable
 
-  E2E_ALGORITHM = "double_ratchet_v1"
+  E2E_ALGORITHM = "double_ratchet_v2"
+  E2E_LEGACY_ALGORITHM = "double_ratchet_v1"
+  E2E_SUPPORTED_ALGORITHMS = [E2E_ALGORITHM, E2E_LEGACY_ALGORITHM].freeze
 
   belongs_to :room, touch: true
   belongs_to :creator, class_name: "User", default: -> { Current.user }
@@ -82,9 +84,9 @@ class Message < ApplicationRecord
 
     def requires_supported_e2e_algorithm
       return unless encrypted?
-      return if encryption_algorithm == E2E_ALGORITHM
+      return if E2E_SUPPORTED_ALGORITHMS.include?(encryption_algorithm)
 
-      errors.add(:e2e_algorithm, "must be #{E2E_ALGORITHM}")
+      errors.add(:e2e_algorithm, "must be one of #{E2E_SUPPORTED_ALGORITHMS.join(', ')}")
     end
 
     def encrypted_payload

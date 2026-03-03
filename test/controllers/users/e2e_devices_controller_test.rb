@@ -71,6 +71,30 @@ class Users::E2eDevicesControllerTest < ActionDispatch::IntegrationTest
     assert_not E2e::SignedPrekey.find_by(device:, key_id: 1001).active?
   end
 
+  test "update creates a device with ECDSA signing key" do
+    put user_e2e_device_url(format: :json), params: {
+      e2e_device: {
+        device_id: "dev-david-signed",
+        name: "David Signed Device",
+        identity_key: "identity-signed",
+        signing_key: '{"kty":"EC","crv":"P-256","x":"abc","y":"def"}',
+        signed_prekey: {
+          key_id: 9501,
+          public_key: "spk-signed",
+          signature: "ecdsa-signature-here"
+        }
+      }
+    }
+
+    assert_response :created
+
+    device = E2e::Device.find_by!(device_id: "dev-david-signed")
+    assert_equal '{"kty":"EC","crv":"P-256","x":"abc","y":"def"}', device.signing_key
+
+    payload = JSON.parse(response.body)
+    assert_equal '{"kty":"EC","crv":"P-256","x":"abc","y":"def"}', payload.dig("device", "signing_key")
+  end
+
   test "update rejects invalid payload" do
     put user_e2e_device_url(format: :json), params: {
       e2e_device: {

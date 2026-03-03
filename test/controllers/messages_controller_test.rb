@@ -342,6 +342,31 @@ class MessagesControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "creating an encrypted message with legacy algorithm still works" do
+    direct_room = rooms(:david_and_jason)
+    payload = {
+      "v" => 1,
+      "alg" => Message::E2E_LEGACY_ALGORITHM,
+      "from" => users(:david).id,
+      "to" => users(:jason).id,
+      "c" => 0,
+      "iv" => "aW5pdGlhbHZlY3Rvcg",
+      "ciphertext" => "Y2lwaGVydGV4dA"
+    }
+
+    post room_messages_url(direct_room, format: :turbo_stream), params: { message: {
+      client_message_id: "enc-legacy-1",
+      e2e_algorithm: Message::E2E_LEGACY_ALGORITHM,
+      e2e_payload: payload.to_json
+    } }
+
+    assert_response :success
+
+    message = Message.last
+    assert message.encrypted?
+    assert_equal Message::E2E_LEGACY_ALGORITHM, message.e2e_algorithm
+  end
+
   test "encrypted messages cannot be edited" do
     direct_room = rooms(:david_and_jason)
     message = direct_room.messages.create!(

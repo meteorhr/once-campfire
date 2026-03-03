@@ -1,7 +1,12 @@
-const ALGORITHM = "double_ratchet_v1"
-const STORAGE_NAMESPACE = "once:e2e:v2"
+const ALGORITHM = "double_ratchet_v2"
+const LEGACY_ALGORITHM = "double_ratchet_v1"
+const SUPPORTED_ALGORITHMS = [ALGORITHM, LEGACY_ALGORITHM]
+const STORAGE_NAMESPACE = "once:e2e:v3"
 const IDENTITY_STORAGE_KEY = `${STORAGE_NAMESPACE}:identity`
 const DEVICE_STORAGE_KEY = `${STORAGE_NAMESPACE}:device`
+const INDEXED_DB_NAME = "once_e2e_keystore"
+const INDEXED_DB_VERSION = 1
+const INDEXED_DB_STORE = "keys"
 const MIN_ONE_TIME_PREKEYS = 20
 const MAX_SKIPPED_KEYS = 500
 const MAX_SKIP_AHEAD = 1000
@@ -30,6 +35,10 @@ export async function getRoomE2EClient({ enabled = false, roomId, peerUserId, de
   return activeClient
 }
 
+export function computeFingerprint(identityPublicKeyJwk) {
+  return computeFingerprintFromJwk(identityPublicKeyJwk)
+}
+
 class E2EClient {
   #roomId
   #peerUserId
@@ -42,6 +51,7 @@ class E2EClient {
   #initialized = false
   #initializing = null
   #onboarded = false
+  #secureStorage = null
 
   constructor({ roomId, peerUserId, deviceUrl, prekeyBundleUrl, selfPrekeyBundleUrl }) {
     this.#roomId = Number(roomId)
@@ -78,6 +88,13 @@ class E2EClient {
 
   get available() {
     return this.#initialized && this.#onboarded
+  }
+
+  get fingerprint() {
+    if (!this.#identity?.publicKeyJwk) {
+      return null
+    }
+    return computeFingerprintFromJwk(this.#identity.publicKeyJwk)
   }
 
   async encrypt(plaintext) {
@@ -136,7 +153,7 @@ class E2EClient {
     this.#persistPeerState()
 
     return {
-      v: 3,
+      v: 4,
       alg: ALGORITHM,
       from: Current.user.id,
       to: this.#peerUserId,
@@ -148,7 +165,7 @@ class E2EClient {
   async decrypt(payload, senderId) {
     await this.initialize()
 
-    if (!this.available || payload?.alg !== ALGORITHM) {
+    if (!this.available || !SUPPORTED_ALGORITHMS.includes(payload?.alg)) {
       return null
     }
 
@@ -203,6 +220,9 @@ class E2EClient {
       return
     }
 
+    this.#secureStorage = await openSecureStorage()
+    await this.#migrateFromLegacyStorage()
+
     this.#identity = await this.#loadOrCreateIdentity()
     this.#deviceState = await this.#loadOrCreateDeviceState()
     this.#peerState = this.#loadOrCreatePeerState()
@@ -214,6 +234,34 @@ class E2EClient {
 
     this.#initialized = true
     this.#onboarded = true
+  }
+
+  async #migrateFromLegacyStorage() {
+    const legacyIdentityKey = `once:e2e:v2:identity`
+    const legacyDeviceKey = `once:e2e:v2:device`
+
+    try {
+      const legacyIdentity = readLocalStorage(legacyIdentityKey)
+      const legacyDevice = readLocalStorage(legacyDeviceKey)
+
+      if (legacyIdentity && validIdentityState(legacyIdentity)) {
+        const existing = await this.#secureStorage?.get(IDENTITY_STORAGE_KEY)
+        if (!existing) {
+          await this.#writeSecureStorage(IDENTITY_STORAGE_KEY, legacyIdentity)
+        }
+        removeLocalStorage(legacyIdentityKey)
+      }
+
+      if (legacyDevice && validDeviceState(legacyDevice)) {
+        const existing = await this.#secureStorage?.get(DEVICE_STORAGE_KEY)
+        if (!existing) {
+          await this.#writeSecureStorage(DEVICE_STORAGE_KEY, legacyDevice)
+        }
+        removeLocalStorage(legacyDeviceKey)
+      }
+    } catch {
+      // Migration is best-effort; old clients will regenerate keys
+    }
   }
 
   async #decryptOwnMessage(payload) {
@@ -273,12 +321,36 @@ class E2EClient {
   }
 
   async #encryptForSession(session, plaintext, recipientUserId, recipientDeviceId) {
+    // DH Ratchet: generate new ratchet key pair for each send turn
+    if (!session.dhRatchetSendKeyPair || session.lastDirection !== "send") {
+      const newDhKeyPair = await generateEcdhKeyPair()
+      const peerDhPublicKeyJwk = session.peerDhPublicKeyJwk
+
+      if (peerDhPublicKeyJwk) {
+        const dhOutput = await deriveSharedSecret(newDhKeyPair.privateKey, peerDhPublicKeyJwk)
+        const newRootKey = await hkdf(
+          concatUint8Arrays([base64UrlToBytes(session.rootKey), dhOutput]),
+          "once/e2e/dh-ratchet/root-key"
+        )
+        const newSendChainKey = await hkdf(newRootKey, "once/e2e/dh-ratchet/chain-key")
+        session.rootKey = bytesToBase64Url(newRootKey)
+        session.sendChainKey = bytesToBase64Url(newSendChainKey)
+        session.sendCounter = 0
+      }
+
+      session.dhRatchetSendKeyPair = {
+        publicKeyJwk: newDhKeyPair.publicKeyJwk,
+        privateKeyJwk: newDhKeyPair.privateKeyJwk
+      }
+      session.lastDirection = "send"
+    }
+
     const chainKey = base64UrlToBytes(session.sendChainKey)
     const { messageKey, nextChainKey } = await this.#advanceChain(chainKey)
     const counter = Number(session.sendCounter)
 
     const aad = this.#buildAad({
-      payloadVersion: 3,
+      payloadVersion: 4,
       counter,
       senderDeviceId: this.#deviceState.deviceId,
       recipientUserId,
@@ -288,6 +360,7 @@ class E2EClient {
     })
 
     const encrypted = await encryptMessage(messageKey, plaintext, aad)
+    zeroize(messageKey)
 
     session.sendCounter = counter + 1
     session.sendChainKey = bytesToBase64Url(nextChainKey)
@@ -300,7 +373,8 @@ class E2EClient {
       recipient_device_id: recipientDeviceId,
       c: counter,
       iv: encrypted.iv,
-      ciphertext: encrypted.ciphertext
+      ciphertext: encrypted.ciphertext,
+      dh_public_key: JSON.stringify(session.dhRatchetSendKeyPair.publicKeyJwk)
     }
 
     if (counter === 0 && session.bootstrap?.pending) {
@@ -319,6 +393,7 @@ class E2EClient {
 
     const messageKey = await this.#deriveMessageKeyForCounter(session.baseSendChainKey, counter)
 
+    const payloadAlg = payload.alg || ALGORITHM
     const aad = this.#buildAad({
       payloadVersion: payload.v || 1,
       counter,
@@ -326,10 +401,13 @@ class E2EClient {
       recipientUserId: envelope.recipient_user_id,
       recipientDeviceId: envelope.recipient_device_id,
       fromUserId: payload.from,
-      toUserId: payload.to
+      toUserId: payload.to,
+      algorithm: payloadAlg
     })
 
-    return decryptMessage(messageKey, envelope, aad)
+    const result = await decryptMessage(messageKey, envelope, aad)
+    zeroize(messageKey)
+    return result
   }
 
   async #decryptIncomingEnvelope(session, payload, envelope) {
@@ -340,6 +418,37 @@ class E2EClient {
 
     if (messageCounter - Number(session.recvCounter) > MAX_SKIP_AHEAD) {
       return null
+    }
+
+    // DH Ratchet: if the sender included a new DH public key, perform ratchet step
+    const senderDhPublicKey = parseJwk(envelope.dh_public_key)
+    if (senderDhPublicKey && JSON.stringify(senderDhPublicKey) !== JSON.stringify(session.peerDhPublicKeyJwk)) {
+      // Skip remaining keys from the old chain
+      while (Number(session.recvCounter) < messageCounter) {
+        const step = await this.#advanceChain(base64UrlToBytes(session.recvChainKey))
+        session.skippedKeys[String(session.recvCounter)] = bytesToBase64Url(step.messageKey)
+        session.recvChainKey = bytesToBase64Url(step.nextChainKey)
+        session.recvCounter = Number(session.recvCounter) + 1
+      }
+
+      session.peerDhPublicKeyJwk = senderDhPublicKey
+
+      if (session.dhRatchetSendKeyPair?.privateKeyJwk) {
+        const dhOutput = await deriveSharedSecret(
+          await importEcdhPrivateKey(session.dhRatchetSendKeyPair.privateKeyJwk),
+          senderDhPublicKey
+        )
+        const newRootKey = await hkdf(
+          concatUint8Arrays([base64UrlToBytes(session.rootKey), dhOutput]),
+          "once/e2e/dh-ratchet/root-key"
+        )
+        const newRecvChainKey = await hkdf(newRootKey, "once/e2e/dh-ratchet/chain-key")
+        session.rootKey = bytesToBase64Url(newRootKey)
+        session.recvChainKey = bytesToBase64Url(newRecvChainKey)
+        session.recvCounter = 0
+      }
+
+      session.lastDirection = "recv"
     }
 
     let messageKey
@@ -370,6 +479,7 @@ class E2EClient {
 
     session.updatedAt = new Date().toISOString()
 
+    const payloadAlg = payload.alg || ALGORITHM
     const aad = this.#buildAad({
       payloadVersion: payload.v || 1,
       counter: messageCounter,
@@ -377,16 +487,20 @@ class E2EClient {
       recipientUserId: envelope.recipient_user_id,
       recipientDeviceId: envelope.recipient_device_id,
       fromUserId: payload.from,
-      toUserId: payload.to
+      toUserId: payload.to,
+      algorithm: payloadAlg
     })
 
-    return decryptMessage(messageKey, envelope, aad)
+    const result = await decryptMessage(messageKey, envelope, aad)
+    zeroize(messageKey)
+    return result
   }
 
-  #buildAad({ payloadVersion, counter, senderDeviceId, recipientUserId, recipientDeviceId, fromUserId, toUserId }) {
+  #buildAad({ payloadVersion, counter, senderDeviceId, recipientUserId, recipientDeviceId, fromUserId, toUserId, algorithm }) {
+    const alg = algorithm || ALGORITHM
     return {
       v: Number(payloadVersion || 1),
-      alg: ALGORITHM,
+      alg,
       from: Number(fromUserId),
       to: Number(toUserId),
       from_device_id: senderDeviceId || null,
@@ -453,6 +567,21 @@ class E2EClient {
       return null
     }
 
+    // Verify signed prekey signature if present
+    if (header.sender_signed_prekey_signature) {
+      const senderSigningKeyJwk = parseJwk(header.sender_signing_key)
+      if (senderSigningKeyJwk) {
+        const signatureValid = await verifyEcdsaSignature(
+          senderSigningKeyJwk,
+          senderIdentityKey,
+          base64UrlToBytes(header.sender_signed_prekey_signature)
+        )
+        if (!signatureValid) {
+          return null
+        }
+      }
+    }
+
     const sharedSecrets = []
     sharedSecrets.push(await deriveSharedSecret(await importEcdhPrivateKey(signedPrekey.privateKeyJwk), senderIdentityKey))
     sharedSecrets.push(await deriveSharedSecret(this.#identity.privateKey, senderEphemeralKey))
@@ -473,7 +602,7 @@ class E2EClient {
     const nowIso = new Date().toISOString()
 
     const session = {
-      version: 4,
+      version: 5,
       peerUserId: Number(senderUserId),
       peerDeviceId: String(senderDeviceId),
       sendCounter: 0,
@@ -482,6 +611,10 @@ class E2EClient {
       recvChainKey: bytesToBase64Url(initiatorChainKey),
       baseSendChainKey: bytesToBase64Url(responderChainKey),
       baseRecvChainKey: bytesToBase64Url(initiatorChainKey),
+      rootKey: bytesToBase64Url(rootKey),
+      dhRatchetSendKeyPair: null,
+      peerDhPublicKeyJwk: null,
+      lastDirection: null,
       skippedKeys: {},
       bootstrap: { pending: false },
       createdAt: nowIso,
@@ -507,6 +640,21 @@ class E2EClient {
       throw new Error("Peer bundle is incomplete")
     }
 
+    // Verify signed prekey signature using ECDSA if available
+    if (bundleDevice.signed_prekey?.signature && bundleDevice.signing_key) {
+      const signerJwk = parseJwk(bundleDevice.signing_key)
+      if (signerJwk) {
+        const signatureValid = await verifyEcdsaSignature(
+          signerJwk,
+          peerSignedPrekey,
+          base64UrlToBytes(bundleDevice.signed_prekey.signature)
+        )
+        if (!signatureValid) {
+          throw new Error("Peer signed prekey signature verification failed")
+        }
+      }
+    }
+
     const ephemeralKey = await generateEcdhKeyPair()
 
     const sharedSecrets = []
@@ -524,7 +672,7 @@ class E2EClient {
     const nowIso = new Date().toISOString()
 
     return {
-      version: 4,
+      version: 5,
       peerUserId: Number(targetUserId),
       peerDeviceId,
       sendCounter: 0,
@@ -533,6 +681,10 @@ class E2EClient {
       recvChainKey: bytesToBase64Url(responderChainKey),
       baseSendChainKey: bytesToBase64Url(initiatorChainKey),
       baseRecvChainKey: bytesToBase64Url(responderChainKey),
+      rootKey: bytesToBase64Url(rootKey),
+      dhRatchetSendKeyPair: null,
+      peerDhPublicKeyJwk: null,
+      lastDirection: null,
       skippedKeys: {},
       bootstrap: {
         pending: true,
@@ -540,6 +692,8 @@ class E2EClient {
           sender_device_id: this.#deviceState.deviceId,
           sender_identity_key: JSON.stringify(this.#identity.publicKeyJwk),
           sender_ephemeral_key: JSON.stringify(ephemeralKey.publicKeyJwk),
+          sender_signing_key: this.#identity.signingPublicKeyJwk ? JSON.stringify(this.#identity.signingPublicKeyJwk) : null,
+          sender_signed_prekey_signature: null,
           recipient_device_id: peerDeviceId,
           recipient_signed_prekey_id: bundleDevice.signed_prekey.key_id,
           recipient_one_time_prekey_id: bundleDevice.one_time_prekey?.key_id || null
@@ -686,28 +840,49 @@ class E2EClient {
   }
 
   async #loadOrCreateIdentity() {
-    const existing = this.#readStorage(IDENTITY_STORAGE_KEY)
+    const existing = await this.#readSecureStorage(IDENTITY_STORAGE_KEY)
 
     if (validIdentityState(existing)) {
       try {
-        return {
+        const identity = {
           publicKeyJwk: existing.publicKeyJwk,
           privateKeyJwk: existing.privateKeyJwk,
           publicKey: await importEcdhPublicKey(existing.publicKeyJwk),
-          privateKey: await importEcdhPrivateKey(existing.privateKeyJwk)
+          privateKey: await importEcdhPrivateKey(existing.privateKeyJwk),
+          signingPublicKeyJwk: existing.signingPublicKeyJwk || null,
+          signingPrivateKeyJwk: existing.signingPrivateKeyJwk || null
         }
+
+        // Generate signing key pair if missing (migration from v1)
+        if (!identity.signingPublicKeyJwk || !identity.signingPrivateKeyJwk) {
+          const signingKeyPair = await generateEcdsaKeyPair()
+          identity.signingPublicKeyJwk = signingKeyPair.publicKeyJwk
+          identity.signingPrivateKeyJwk = signingKeyPair.privateKeyJwk
+          await this.#writeSecureStorage(IDENTITY_STORAGE_KEY, {
+            publicKeyJwk: identity.publicKeyJwk,
+            privateKeyJwk: identity.privateKeyJwk,
+            signingPublicKeyJwk: identity.signingPublicKeyJwk,
+            signingPrivateKeyJwk: identity.signingPrivateKeyJwk
+          })
+        }
+
+        return identity
       } catch {
-        this.#removeStorage(IDENTITY_STORAGE_KEY)
+        await this.#removeSecureStorage(IDENTITY_STORAGE_KEY)
       }
     }
 
     const generated = await generateEcdhKeyPair()
+    const signingKeyPair = await generateEcdsaKeyPair()
+
     const identity = {
       publicKeyJwk: generated.publicKeyJwk,
-      privateKeyJwk: generated.privateKeyJwk
+      privateKeyJwk: generated.privateKeyJwk,
+      signingPublicKeyJwk: signingKeyPair.publicKeyJwk,
+      signingPrivateKeyJwk: signingKeyPair.privateKeyJwk
     }
 
-    this.#writeStorage(IDENTITY_STORAGE_KEY, identity)
+    await this.#writeSecureStorage(IDENTITY_STORAGE_KEY, identity)
 
     return {
       ...identity,
@@ -717,7 +892,7 @@ class E2EClient {
   }
 
   async #loadOrCreateDeviceState() {
-    const existing = this.#readStorage(DEVICE_STORAGE_KEY)
+    const existing = await this.#readSecureStorage(DEVICE_STORAGE_KEY)
 
     if (validDeviceState(existing)) {
       return normalizeDeviceState(existing)
@@ -725,7 +900,7 @@ class E2EClient {
 
     const signedPrekey = await generateEcdhKeyPair()
     const nowIso = new Date().toISOString()
-    const signedPrekeyId = randomIntegerId()
+    const signedPrekeyId = secureRandomIntegerId()
 
     return {
       deviceId: randomIdentifier("device"),
@@ -738,7 +913,7 @@ class E2EClient {
       },
       nextSignedPrekeyId: signedPrekeyId + 1,
       oneTimePrekeys: [],
-      nextOneTimePrekeyId: randomIntegerId()
+      nextOneTimePrekeyId: secureRandomIntegerId()
     }
   }
 
@@ -747,7 +922,7 @@ class E2EClient {
 
     if (!validPeerState(existing)) {
       return {
-        version: 4,
+        version: 5,
         roomId: this.#roomId,
         peerUserId: this.#peerUserId,
         sessions: {}
@@ -755,7 +930,7 @@ class E2EClient {
     }
 
     return {
-      version: 4,
+      version: 5,
       roomId: this.#roomId,
       peerUserId: this.#peerUserId,
       sessions: normalizeSessions(existing.sessions)
@@ -789,12 +964,19 @@ class E2EClient {
   async #refreshDeviceOnServer() {
     const pendingOneTimePrekeys = this.#deviceState.oneTimePrekeys.filter((prekey) => !prekey.uploadedAt && !prekey.consumedAt)
 
-    const signature = await pseudoSign(this.#identity.publicKeyJwk, this.#deviceState.signedPrekey.publicKeyJwk)
+    // Sign the signed prekey with ECDSA identity signing key
+    const signature = await ecdsaSign(
+      this.#identity.signingPrivateKeyJwk,
+      this.#identity.publicKeyJwk,
+      this.#deviceState.signedPrekey.publicKeyJwk
+    )
+
     const payload = {
       e2e_device: {
         device_id: this.#deviceState.deviceId,
         name: this.#deviceState.name,
         identity_key: JSON.stringify(this.#identity.publicKeyJwk),
+        signing_key: JSON.stringify(this.#identity.signingPublicKeyJwk),
         signed_prekey: {
           key_id: this.#deviceState.signedPrekey.keyId,
           public_key: JSON.stringify(this.#deviceState.signedPrekey.publicKeyJwk),
@@ -917,35 +1099,139 @@ class E2EClient {
     this.#writeStorage(this.#peerStateStorageKey, this.#peerState)
   }
 
-  #persistDeviceState() {
-    this.#writeStorage(DEVICE_STORAGE_KEY, this.#deviceState)
+  async #persistDeviceState() {
+    await this.#writeSecureStorage(DEVICE_STORAGE_KEY, this.#deviceState)
+  }
+
+  async #readSecureStorage(key) {
+    if (this.#secureStorage) {
+      try {
+        return await this.#secureStorage.get(key)
+      } catch {
+        // Fall through to localStorage
+      }
+    }
+    return this.#readStorage(key)
+  }
+
+  async #writeSecureStorage(key, value) {
+    if (this.#secureStorage) {
+      try {
+        await this.#secureStorage.put(key, value)
+        return
+      } catch {
+        // Fall through to localStorage
+      }
+    }
+    this.#writeStorage(key, value)
+  }
+
+  async #removeSecureStorage(key) {
+    if (this.#secureStorage) {
+      try {
+        await this.#secureStorage.delete(key)
+      } catch {
+        // Ignore
+      }
+    }
+    this.#removeStorage(key)
   }
 
   #readStorage(key) {
-    try {
-      const rawValue = localStorage.getItem(key)
-      return rawValue ? JSON.parse(rawValue) : null
-    } catch {
-      return null
-    }
+    return readLocalStorage(key)
   }
 
   #writeStorage(key, value) {
-    try {
-      localStorage.setItem(key, JSON.stringify(value))
-    } catch {
-      // Ignore storage write errors and continue with in-memory state.
-    }
+    writeLocalStorage(key, value)
   }
 
   #removeStorage(key) {
-    try {
-      localStorage.removeItem(key)
-    } catch {
-      // Ignore storage cleanup errors.
-    }
+    removeLocalStorage(key)
   }
 }
+
+// --- Secure IndexedDB storage ---
+
+async function openSecureStorage() {
+  if (typeof indexedDB === "undefined") {
+    return null
+  }
+
+  try {
+    const db = await new Promise((resolve, reject) => {
+      const request = indexedDB.open(INDEXED_DB_NAME, INDEXED_DB_VERSION)
+      request.onupgradeneeded = () => {
+        const db = request.result
+        if (!db.objectStoreNames.contains(INDEXED_DB_STORE)) {
+          db.createObjectStore(INDEXED_DB_STORE)
+        }
+      }
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => reject(request.error)
+    })
+
+    return {
+      async get(key) {
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(INDEXED_DB_STORE, "readonly")
+          const store = tx.objectStore(INDEXED_DB_STORE)
+          const request = store.get(key)
+          request.onsuccess = () => resolve(request.result || null)
+          request.onerror = () => reject(request.error)
+        })
+      },
+      async put(key, value) {
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(INDEXED_DB_STORE, "readwrite")
+          const store = tx.objectStore(INDEXED_DB_STORE)
+          const request = store.put(value, key)
+          request.onsuccess = () => resolve()
+          request.onerror = () => reject(request.error)
+        })
+      },
+      async delete(key) {
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(INDEXED_DB_STORE, "readwrite")
+          const store = tx.objectStore(INDEXED_DB_STORE)
+          const request = store.delete(key)
+          request.onsuccess = () => resolve()
+          request.onerror = () => reject(request.error)
+        })
+      }
+    }
+  } catch {
+    return null
+  }
+}
+
+// --- localStorage helpers ---
+
+function readLocalStorage(key) {
+  try {
+    const rawValue = localStorage.getItem(key)
+    return rawValue ? JSON.parse(rawValue) : null
+  } catch {
+    return null
+  }
+}
+
+function writeLocalStorage(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+  } catch {
+    // Ignore storage write errors and continue with in-memory state.
+  }
+}
+
+function removeLocalStorage(key) {
+  try {
+    localStorage.removeItem(key)
+  } catch {
+    // Ignore storage cleanup errors.
+  }
+}
+
+// --- Validation helpers ---
 
 function validIdentityState(value) {
   return Boolean(value?.publicKeyJwk && value?.privateKeyJwk)
@@ -1018,7 +1304,7 @@ function normalizeSessions(input) {
 
     sessions[normalizedKey] = {
       ...session,
-      version: Number(session.version || 4),
+      version: Number(session.version || 5),
       peerUserId,
       peerDeviceId,
       sendCounter: Number(session.sendCounter),
@@ -1028,7 +1314,11 @@ function normalizeSessions(input) {
       updatedAt: session.updatedAt || session.createdAt || new Date().toISOString(),
       lastSentAt: session.lastSentAt || null,
       lastReceivedAt: session.lastReceivedAt || null,
-      bootstrap: normalizeBootstrap(session.bootstrap)
+      bootstrap: normalizeBootstrap(session.bootstrap),
+      rootKey: session.rootKey || session.baseSendChainKey,
+      dhRatchetSendKeyPair: session.dhRatchetSendKeyPair || null,
+      peerDhPublicKeyJwk: session.peerDhPublicKeyJwk || null,
+      lastDirection: session.lastDirection || null
     }
   }
 
@@ -1084,9 +1374,19 @@ function randomIdentifier(prefix) {
   return `${prefix}-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`
 }
 
-function randomIntegerId() {
-  return Math.floor(Date.now() % 1_000_000_000 + Math.random() * 10_000)
+function secureRandomIntegerId() {
+  const array = new Uint32Array(1)
+  crypto.getRandomValues(array)
+  return array[0] % 1_000_000_000
 }
+
+function zeroize(buffer) {
+  if (buffer instanceof Uint8Array) {
+    buffer.fill(0)
+  }
+}
+
+// --- ECDH key operations ---
 
 async function generateEcdhKeyPair() {
   const keyPair = await crypto.subtle.generateKey(
@@ -1132,6 +1432,83 @@ async function deriveSharedSecret(privateKey, publicKeyJwk) {
     256
   ))
 }
+
+// --- ECDSA signing key operations ---
+
+async function generateEcdsaKeyPair() {
+  const keyPair = await crypto.subtle.generateKey(
+    { name: "ECDSA", namedCurve: "P-256" },
+    true,
+    [ "sign", "verify" ]
+  )
+
+  return {
+    publicKeyJwk: await crypto.subtle.exportKey("jwk", keyPair.publicKey),
+    privateKeyJwk: await crypto.subtle.exportKey("jwk", keyPair.privateKey)
+  }
+}
+
+async function ecdsaSign(signingPrivateKeyJwk, identityPublicKeyJwk, signedPrekeyPublicKeyJwk) {
+  const privateKey = await crypto.subtle.importKey(
+    "jwk",
+    signingPrivateKeyJwk,
+    { name: "ECDSA", namedCurve: "P-256" },
+    false,
+    [ "sign" ]
+  )
+
+  const data = textEncoder.encode(`${JSON.stringify(identityPublicKeyJwk)}:${JSON.stringify(signedPrekeyPublicKeyJwk)}`)
+  const signature = await crypto.subtle.sign(
+    { name: "ECDSA", hash: "SHA-256" },
+    privateKey,
+    data
+  )
+
+  return bytesToBase64Url(new Uint8Array(signature))
+}
+
+async function verifyEcdsaSignature(signingPublicKeyJwk, signedPrekeyPublicKeyJwk, signatureBytes) {
+  try {
+    const publicKey = await crypto.subtle.importKey(
+      "jwk",
+      signingPublicKeyJwk,
+      { name: "ECDSA", namedCurve: "P-256" },
+      false,
+      [ "verify" ]
+    )
+
+    // Reconstruct the same data format used during signing
+    const identityKeyJwk = signingPublicKeyJwk
+    const data = textEncoder.encode(`${JSON.stringify(identityKeyJwk)}:${JSON.stringify(signedPrekeyPublicKeyJwk)}`)
+
+    return crypto.subtle.verify(
+      { name: "ECDSA", hash: "SHA-256" },
+      publicKey,
+      signatureBytes,
+      data
+    )
+  } catch {
+    return false
+  }
+}
+
+async function computeFingerprintFromJwk(publicKeyJwk) {
+  const data = textEncoder.encode(JSON.stringify(publicKeyJwk))
+  const digest = await crypto.subtle.digest("SHA-256", data)
+  const bytes = new Uint8Array(digest)
+
+  // Format as groups of 5-digit numbers (similar to Signal's safety numbers)
+  const numbers = []
+  for (let i = 0; i < 6; i++) {
+    const offset = i * 4
+    const value = ((bytes[offset] << 24) | (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3]) >>> 0
+    numbers.push(String(value % 100000).padStart(5, "0"))
+  }
+
+  return numbers.join(" ")
+}
+
+// --- KDF and encryption ---
 
 async function hkdf(inputKeyMaterial, info, salt = ZERO_SALT, length = 32) {
   const key = await crypto.subtle.importKey(
@@ -1244,6 +1621,8 @@ function encodeAad(payload) {
   ]))
 }
 
+// --- Encoding helpers ---
+
 function csrfToken() {
   return document.querySelector('meta[name="csrf-token"]')?.content
 }
@@ -1309,10 +1688,4 @@ function concatUint8Arrays(values) {
   }
 
   return result
-}
-
-async function pseudoSign(identityPublicKeyJwk, signedPrekeyPublicKeyJwk) {
-  const digestInput = textEncoder.encode(`${JSON.stringify(identityPublicKeyJwk)}:${JSON.stringify(signedPrekeyPublicKeyJwk)}`)
-  const digest = await crypto.subtle.digest("SHA-256", digestInput)
-  return bytesToBase64Url(new Uint8Array(digest))
 }

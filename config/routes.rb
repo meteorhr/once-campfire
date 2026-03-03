@@ -47,6 +47,8 @@ Rails.application.routes.draw do
 
       scope defaults: { user_id: "me" } do
         resource :e2e_device, only: %i[ show update ]
+        resources :e2e_devices_management, only: %i[ index destroy ]
+        resource :e2e_reset, only: :create
         resource :sidebar, only: :show
         resource :profile
         resources :push_subscriptions do

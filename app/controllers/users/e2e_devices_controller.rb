@@ -17,12 +17,14 @@ class Users::E2eDevicesController < ApplicationController
     created = device.new_record?
 
     E2e::Device.transaction do
-      device.assign_attributes(
+      attrs = {
         name: e2e_device_params.fetch(:name),
         identity_key: e2e_device_params.fetch(:identity_key),
         last_prekey_uploaded_at: Time.current,
         revoked_at: nil
-      )
+      }
+      attrs[:signing_key] = e2e_device_params[:signing_key] if e2e_device_params[:signing_key].present?
+      device.assign_attributes(attrs)
       device.save!
 
       upsert_signed_prekey!(device, signed_prekey_params)
@@ -40,6 +42,7 @@ class Users::E2eDevicesController < ApplicationController
         :device_id,
         :name,
         :identity_key,
+        :signing_key,
         signed_prekey: [ :key_id, :public_key, :signature, :expires_at ],
         one_time_prekeys: [ :key_id, :public_key ]
       )
@@ -87,6 +90,7 @@ class Users::E2eDevicesController < ApplicationController
           device_id: device.device_id,
           name: device.name,
           identity_key: device.identity_key,
+          signing_key: device.signing_key,
           signed_prekey: signed_prekey_payload(device.active_signed_prekey),
           one_time_prekeys_available: device.one_time_prekeys.available.count,
           updated_at: device.updated_at.iso8601

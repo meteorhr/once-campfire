@@ -99,7 +99,7 @@ class MessagesController < ApplicationController
       raise InvalidE2ePayload, "Attachment uploads cannot be sent as encrypted messages" if permitted[:attachment].present?
 
       algorithm = permitted[:e2e_algorithm].to_s
-      raise InvalidE2ePayload, "Unsupported encryption algorithm" unless algorithm == Message::E2E_ALGORITHM
+      raise InvalidE2ePayload, "Unsupported encryption algorithm" unless Message::E2E_SUPPORTED_ALGORITHMS.include?(algorithm)
 
       payload = parse_e2e_payload(permitted[:e2e_payload])
       validate_e2e_payload!(payload)
@@ -117,7 +117,7 @@ class MessagesController < ApplicationController
     end
 
     def validate_e2e_payload!(payload)
-      raise InvalidE2ePayload, "Encrypted payload algorithm mismatch" unless payload["alg"] == Message::E2E_ALGORITHM
+      raise InvalidE2ePayload, "Encrypted payload algorithm mismatch" unless Message::E2E_SUPPORTED_ALGORITHMS.include?(payload["alg"])
       raise InvalidE2ePayload, "Encrypted payload sender mismatch" unless payload["from"].to_i == Current.user.id
 
       recipient_id = @room.users.where.not(id: Current.user.id).pick(:id)

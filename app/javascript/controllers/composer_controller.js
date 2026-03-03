@@ -159,7 +159,7 @@ export default class extends Controller {
           const plaintext = this.#plaintextInput
           const payload = await this.#e2eClient.encrypt(plaintext)
 
-          this.e2eAlgorithmTarget.value = "double_ratchet_v1"
+          this.e2eAlgorithmTarget.value = "double_ratchet_v2"
           this.e2ePayloadTarget.value = JSON.stringify(payload)
           pendingNode = `<div class=\"trix-content\"><div>${escapeHTML(plaintext)}</div></div>`
           this.#clearEditor()
