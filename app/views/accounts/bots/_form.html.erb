@@ -13,18 +13,16 @@
 </label>
 
 <div class="flex align-center gap">
-  <%= translation_button(:bot_name) %>
   <label class="flex align-center gap flex-item-grow txt-large input input--actor">
-    <%= form.text_field :name, class: "input", autocomplete: "name", placeholder: "Name the bot", autofocus: true, required: true,
+    <%= form.text_field :name, class: "input", autocomplete: "name", placeholder: translation_hint(:bot_name), autofocus: true, required: true,
           data: { "1p-ignore": true } %>
     <%= image_tag "bot.svg", aria: { hidden: "true" }, size: 24, class: "colorize--black" %>
   </label>
 </div>
 
 <div class="flex align-center gap">
-  <%= translation_button(:webhook_url) %>
   <label class="flex align-center gap flex-item-grow txt-large input input--actor">
-    <%= form.url_field :webhook_url, class: "input", placeholder: "Webhook URL" %>
+    <%= form.url_field :webhook_url, class: "input", placeholder: translation_hint(:webhook_url) %>
     <%= image_tag "web.svg", aria: { hidden: "true" }, size: 24, class: "colorize--black" %>
   </label>
 </div>

@@ -56,10 +56,8 @@
 
     <%= form_with model: @account, data: { controller: "form" }, class: "flex flex-column gap" do |form| %>
       <div class="flex align-center gap">
-        <%= translation_button(:account_name) %>
-
         <label class="flex align-center gap flex-item-grow">
-          <%= form.text_field :name, class: "input txt-large", autocomplete: "off", placeholder: "Name this account", autofocus: true,
+          <%= form.text_field :name, class: "input txt-large", autocomplete: "off", placeholder: translation_hint(:account_name), autofocus: true,
                 data: { action: "keydown.enter->form#submit" } %>
         </label>
 

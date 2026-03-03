@@ -15,17 +15,17 @@ const textDecoder = new TextDecoder()
 
 let activeClient = null
 
-export async function getRoomE2EClient({ enabled = false, roomId, peerUserId, deviceUrl, prekeyBundleUrl }) {
+export async function getRoomE2EClient({ enabled = false, roomId, peerUserId, deviceUrl, prekeyBundleUrl, selfPrekeyBundleUrl }) {
   if (!enabled || !roomId || !peerUserId || !deviceUrl || !prekeyBundleUrl) {
     return null
   }
 
-  if (activeClient && activeClient.matches({ roomId, peerUserId, deviceUrl, prekeyBundleUrl })) {
+  if (activeClient && activeClient.matches({ roomId, peerUserId, deviceUrl, prekeyBundleUrl, selfPrekeyBundleUrl })) {
     await activeClient.initialize()
     return activeClient
   }
 
-  activeClient = new E2EClient({ roomId, peerUserId, deviceUrl, prekeyBundleUrl })
+  activeClient = new E2EClient({ roomId, peerUserId, deviceUrl, prekeyBundleUrl, selfPrekeyBundleUrl })
   await activeClient.initialize()
   return activeClient
 }
@@ -35,6 +35,7 @@ class E2EClient {
   #peerUserId
   #deviceUrl
   #prekeyBundleUrl
+  #selfPrekeyBundleUrl
   #identity = null
   #deviceState = null
   #peerState = null
@@ -42,19 +43,21 @@ class E2EClient {
   #initializing = null
   #onboarded = false
 
-  constructor({ roomId, peerUserId, deviceUrl, prekeyBundleUrl }) {
+  constructor({ roomId, peerUserId, deviceUrl, prekeyBundleUrl, selfPrekeyBundleUrl }) {
     this.#roomId = Number(roomId)
     this.#peerUserId = Number(peerUserId)
     this.#deviceUrl = deviceUrl
     this.#prekeyBundleUrl = prekeyBundleUrl
+    this.#selfPrekeyBundleUrl = selfPrekeyBundleUrl || null
   }
 
-  matches({ roomId, peerUserId, deviceUrl, prekeyBundleUrl }) {
+  matches({ roomId, peerUserId, deviceUrl, prekeyBundleUrl, selfPrekeyBundleUrl }) {
     return (
       this.#roomId === Number(roomId) &&
       this.#peerUserId === Number(peerUserId) &&
       this.#deviceUrl === deviceUrl &&
-      this.#prekeyBundleUrl === prekeyBundleUrl
+      this.#prekeyBundleUrl === prekeyBundleUrl &&
+      this.#selfPrekeyBundleUrl === (selfPrekeyBundleUrl || null)
     )
   }
 
@@ -84,36 +87,56 @@ class E2EClient {
       throw new Error("E2E onboarding is not complete")
     }
 
-    const knownDeviceIds = Object.keys(this.#peerState.sessions || {})
-    const bundle = await this.#fetchPrekeyBundle(knownDeviceIds)
-    const peerDevices = this.#extractPeerDevices(bundle)
+    const envelopes = []
+
+    const peerBundle = await this.#fetchPrekeyBundle(this.#prekeyBundleUrl, this.#knownDeviceIdsForUser(this.#peerUserId))
+    const peerDevices = this.#extractBundleDevices(peerBundle)
 
     if (peerDevices.length === 0) {
       throw new Error("Peer prekey bundle is unavailable")
     }
 
-    const envelopes = []
-
     for (const peerDevice of peerDevices) {
-      const session = await this.#ensureInitiatorSessionForDevice(peerDevice)
+      const session = await this.#ensureInitiatorSessionForDevice(peerDevice, this.#peerUserId)
       if (!session) {
         continue
       }
 
-      const envelope = await this.#encryptForSession(session, plaintext, peerDevice.device_id)
+      const envelope = await this.#encryptForSession(session, plaintext, this.#peerUserId, peerDevice.device_id)
       if (envelope) {
         envelopes.push(envelope)
       }
     }
 
-    if (envelopes.length === 0) {
+    if (this.#selfPrekeyBundleUrl) {
+      const selfBundle = await this.#fetchPrekeyBundle(this.#selfPrekeyBundleUrl, this.#knownDeviceIdsForUser(Current.user.id))
+      const selfDevices = this.#extractBundleDevices(selfBundle)
+
+      for (const selfDevice of selfDevices) {
+        if (String(selfDevice.device_id) === this.#deviceState.deviceId) {
+          continue
+        }
+
+        const session = await this.#ensureInitiatorSessionForDevice(selfDevice, Current.user.id)
+        if (!session) {
+          continue
+        }
+
+        const envelope = await this.#encryptForSession(session, plaintext, Current.user.id, selfDevice.device_id)
+        if (envelope) {
+          envelopes.push(envelope)
+        }
+      }
+    }
+
+    if (!envelopes.some((envelope) => Number(envelope.recipient_user_id) === this.#peerUserId)) {
       throw new Error("Unable to encrypt for peer devices")
     }
 
     this.#persistPeerState()
 
     return {
-      v: 2,
+      v: 3,
       alg: ALGORITHM,
       from: Current.user.id,
       to: this.#peerUserId,
@@ -132,7 +155,7 @@ class E2EClient {
     const numericSenderId = Number(senderId)
 
     if (numericSenderId === Current.user.id) {
-      return this.#decryptOutgoing(payload)
+      return this.#decryptOwnMessage(payload)
     }
 
     if (numericSenderId !== this.#peerUserId) {
@@ -149,10 +172,14 @@ class E2EClient {
       return null
     }
 
-    let session = this.#sessionForDevice(senderDeviceId)
+    let session = this.#sessionForDevice(this.#peerUserId, senderDeviceId)
 
     if (!session) {
-      session = await this.#bootstrapResponderSession(senderDeviceId, envelope)
+      session = await this.#bootstrapResponderSession({
+        senderUserId: this.#peerUserId,
+        senderDeviceId,
+        envelope
+      })
     }
 
     if (!session) {
@@ -189,21 +216,76 @@ class E2EClient {
     this.#onboarded = true
   }
 
-  async #encryptForSession(session, plaintext, recipientDeviceId) {
+  async #decryptOwnMessage(payload) {
+    const envelopes = this.#extractOutgoingEnvelopes(payload)
+
+    for (const envelope of envelopes) {
+      const recipientDeviceId = String(envelope.recipient_device_id || "")
+      const senderDeviceId = String(envelope.sender_device_id || "")
+      const recipientUserId = Number(envelope.recipient_user_id || payload.to || this.#peerUserId)
+
+      if (recipientDeviceId === this.#deviceState.deviceId && senderDeviceId && senderDeviceId !== this.#deviceState.deviceId) {
+        let session = this.#sessionForDevice(Current.user.id, senderDeviceId)
+
+        if (!session) {
+          session = await this.#bootstrapResponderSession({
+            senderUserId: Current.user.id,
+            senderDeviceId,
+            envelope
+          })
+        }
+
+        if (session) {
+          const plaintext = await this.#decryptIncomingEnvelope(session, payload, envelope)
+          if (plaintext !== null) {
+            session.lastReceivedAt = new Date().toISOString()
+            session.updatedAt = session.lastReceivedAt
+            this.#persistPeerState()
+            return plaintext
+          }
+        }
+      }
+
+      if (senderDeviceId === this.#deviceState.deviceId) {
+        if (recipientDeviceId) {
+          const session = this.#sessionForDevice(recipientUserId, recipientDeviceId)
+          if (!session) {
+            continue
+          }
+
+          const plaintext = await this.#decryptOutgoingEnvelope(session, payload, envelope)
+          if (plaintext !== null) {
+            return plaintext
+          }
+          continue
+        }
+
+        for (const session of this.#sessionsForUser(recipientUserId)) {
+          const plaintext = await this.#decryptOutgoingEnvelope(session, payload, envelope)
+          if (plaintext !== null) {
+            return plaintext
+          }
+        }
+      }
+    }
+
+    return null
+  }
+
+  async #encryptForSession(session, plaintext, recipientUserId, recipientDeviceId) {
     const chainKey = base64UrlToBytes(session.sendChainKey)
     const { messageKey, nextChainKey } = await this.#advanceChain(chainKey)
     const counter = Number(session.sendCounter)
 
-    const aad = {
-      v: 2,
-      alg: ALGORITHM,
-      from: Current.user.id,
-      to: this.#peerUserId,
-      from_device_id: this.#deviceState.deviceId,
-      sender_device_id: this.#deviceState.deviceId,
-      recipient_device_id: recipientDeviceId,
-      c: counter
-    }
+    const aad = this.#buildAad({
+      payloadVersion: 3,
+      counter,
+      senderDeviceId: this.#deviceState.deviceId,
+      recipientUserId,
+      recipientDeviceId,
+      fromUserId: Current.user.id,
+      toUserId: this.#peerUserId
+    })
 
     const encrypted = await encryptMessage(messageKey, plaintext, aad)
 
@@ -214,6 +296,7 @@ class E2EClient {
 
     const envelope = {
       sender_device_id: this.#deviceState.deviceId,
+      recipient_user_id: recipientUserId,
       recipient_device_id: recipientDeviceId,
       c: counter,
       iv: encrypted.iv,
@@ -228,37 +311,6 @@ class E2EClient {
     return envelope
   }
 
-  async #decryptOutgoing(payload) {
-    const envelopes = this.#extractOutgoingEnvelopes(payload)
-
-    for (const envelope of envelopes) {
-      const recipientDeviceId = String(envelope.recipient_device_id || "")
-
-      if (recipientDeviceId) {
-        const session = this.#sessionForDevice(recipientDeviceId)
-        if (!session) {
-          continue
-        }
-
-        const plaintext = await this.#decryptOutgoingEnvelope(session, payload, envelope)
-        if (plaintext !== null) {
-          return plaintext
-        }
-
-        continue
-      }
-
-      for (const session of Object.values(this.#peerState.sessions)) {
-        const plaintext = await this.#decryptOutgoingEnvelope(session, payload, envelope)
-        if (plaintext !== null) {
-          return plaintext
-        }
-      }
-    }
-
-    return null
-  }
-
   async #decryptOutgoingEnvelope(session, payload, envelope) {
     const counter = Number(envelope.c)
     if (!Number.isInteger(counter) || counter < 0) {
@@ -267,16 +319,15 @@ class E2EClient {
 
     const messageKey = await this.#deriveMessageKeyForCounter(session.baseSendChainKey, counter)
 
-    const aad = {
-      v: payload.v || 1,
-      alg: payload.alg,
-      from: payload.from,
-      to: payload.to,
-      from_device_id: payload.from_device_id || envelope.sender_device_id,
-      sender_device_id: envelope.sender_device_id || payload.from_device_id,
-      recipient_device_id: envelope.recipient_device_id,
-      c: counter
-    }
+    const aad = this.#buildAad({
+      payloadVersion: payload.v || 1,
+      counter,
+      senderDeviceId: envelope.sender_device_id || payload.from_device_id,
+      recipientUserId: envelope.recipient_user_id,
+      recipientDeviceId: envelope.recipient_device_id,
+      fromUserId: payload.from,
+      toUserId: payload.to
+    })
 
     return decryptMessage(messageKey, envelope, aad)
   }
@@ -319,36 +370,47 @@ class E2EClient {
 
     session.updatedAt = new Date().toISOString()
 
-    const aad = {
-      v: payload.v || 1,
-      alg: payload.alg,
-      from: payload.from,
-      to: payload.to,
-      from_device_id: payload.from_device_id || envelope.sender_device_id,
-      sender_device_id: envelope.sender_device_id || payload.from_device_id,
-      recipient_device_id: envelope.recipient_device_id,
-      c: messageCounter
-    }
+    const aad = this.#buildAad({
+      payloadVersion: payload.v || 1,
+      counter: messageCounter,
+      senderDeviceId: envelope.sender_device_id || payload.from_device_id,
+      recipientUserId: envelope.recipient_user_id,
+      recipientDeviceId: envelope.recipient_device_id,
+      fromUserId: payload.from,
+      toUserId: payload.to
+    })
 
     return decryptMessage(messageKey, envelope, aad)
   }
 
-  async #ensureInitiatorSessionForDevice(deviceBundle) {
+  #buildAad({ payloadVersion, counter, senderDeviceId, recipientUserId, recipientDeviceId, fromUserId, toUserId }) {
+    return {
+      v: Number(payloadVersion || 1),
+      alg: ALGORITHM,
+      from: Number(fromUserId),
+      to: Number(toUserId),
+      from_device_id: senderDeviceId || null,
+      sender_device_id: senderDeviceId || null,
+      recipient_user_id: Number(recipientUserId || 0),
+      recipient_device_id: recipientDeviceId || null,
+      c: Number(counter)
+    }
+  }
+
+  async #ensureInitiatorSessionForDevice(deviceBundle, targetUserId) {
     const peerDeviceId = String(deviceBundle.device_id || "")
     if (!peerDeviceId) {
       return null
     }
 
-    const existingSession = this.#sessionForDevice(peerDeviceId)
+    const existingSession = this.#sessionForDevice(targetUserId, peerDeviceId)
 
     if (existingSession && !this.#shouldRotateSession(existingSession)) {
       return existingSession
     }
 
-    const nextSession = await this.#createInitiatorSession(deviceBundle)
-    this.#peerState.sessions[peerDeviceId] = nextSession
-    this.#markKnownPeerDevice(peerDeviceId)
-
+    const nextSession = await this.#createInitiatorSession(deviceBundle, targetUserId)
+    this.#setSession(nextSession)
     return nextSession
   }
 
@@ -369,7 +431,7 @@ class E2EClient {
     return Date.now() - createdAt > SESSION_ROTATE_AFTER_MS
   }
 
-  async #bootstrapResponderSession(senderDeviceId, envelope) {
+  async #bootstrapResponderSession({ senderUserId, senderDeviceId, envelope }) {
     const header = envelope?.x3dh
     if (!header) {
       return null
@@ -411,8 +473,8 @@ class E2EClient {
     const nowIso = new Date().toISOString()
 
     const session = {
-      version: 3,
-      peerUserId: this.#peerUserId,
+      version: 4,
+      peerUserId: Number(senderUserId),
       peerDeviceId: String(senderDeviceId),
       sendCounter: 0,
       recvCounter: 0,
@@ -428,15 +490,14 @@ class E2EClient {
       lastSentAt: null
     }
 
-    this.#peerState.sessions[String(senderDeviceId)] = session
-    this.#markKnownPeerDevice(String(senderDeviceId))
+    this.#setSession(session)
     this.#persistDeviceState()
     this.#persistPeerState()
 
     return session
   }
 
-  async #createInitiatorSession(bundleDevice) {
+  async #createInitiatorSession(bundleDevice, targetUserId) {
     const peerDeviceId = String(bundleDevice.device_id || "")
     const peerIdentityKey = parseJwk(bundleDevice.identity_key)
     const peerSignedPrekey = parseJwk(bundleDevice?.signed_prekey?.public_key)
@@ -463,8 +524,8 @@ class E2EClient {
     const nowIso = new Date().toISOString()
 
     return {
-      version: 3,
-      peerUserId: this.#peerUserId,
+      version: 4,
+      peerUserId: Number(targetUserId),
       peerDeviceId,
       sendCounter: 0,
       recvCounter: 0,
@@ -493,12 +554,17 @@ class E2EClient {
 
   #findIncomingEnvelope(payload) {
     if (Array.isArray(payload?.envelopes)) {
-      return payload.envelopes.find((envelope) => String(envelope?.recipient_device_id || "") === this.#deviceState.deviceId) || null
+      return payload.envelopes.find((envelope) => {
+        const recipientDeviceId = String(envelope?.recipient_device_id || "")
+        const recipientUserId = Number(envelope?.recipient_user_id || Current.user.id)
+        return recipientDeviceId === this.#deviceState.deviceId && recipientUserId === Current.user.id
+      }) || null
     }
 
     if (payload?.iv && payload?.ciphertext) {
       return {
         sender_device_id: payload?.x3dh?.sender_device_id || payload?.from_device_id,
+        recipient_user_id: Current.user.id,
         recipient_device_id: this.#deviceState.deviceId,
         c: payload.c,
         iv: payload.iv,
@@ -518,6 +584,7 @@ class E2EClient {
     if (payload?.iv && payload?.ciphertext) {
       return [ {
         sender_device_id: payload?.x3dh?.sender_device_id || payload?.from_device_id || this.#deviceState.deviceId,
+        recipient_user_id: payload.to,
         recipient_device_id: payload?.x3dh?.recipient_device_id,
         c: payload.c,
         iv: payload.iv,
@@ -562,27 +629,27 @@ class E2EClient {
     const sessions = this.#peerState.sessions || {}
     const now = Date.now()
 
-    for (const [ peerDeviceId, session ] of Object.entries(sessions)) {
+    for (const [ key, session ] of Object.entries(sessions)) {
       if (!validSessionState(session)) {
-        delete sessions[peerDeviceId]
+        delete sessions[key]
         continue
       }
 
       const touchedAt = parseIsoTime(session.updatedAt || session.lastReceivedAt || session.lastSentAt || session.createdAt)
       if (!touchedAt || now - touchedAt > SESSION_EVICT_AFTER_MS) {
-        delete sessions[peerDeviceId]
+        delete sessions[key]
       }
     }
 
     this.#persistPeerState()
   }
 
-  #sessionForDevice(peerDeviceId) {
-    const key = String(peerDeviceId || "")
-    if (!key) {
-      return null
-    }
+  #sessionKey(peerUserId, peerDeviceId) {
+    return `${Number(peerUserId)}:${String(peerDeviceId || "")}`
+  }
 
+  #sessionForDevice(peerUserId, peerDeviceId) {
+    const key = this.#sessionKey(peerUserId, peerDeviceId)
     const session = this.#peerState.sessions?.[key]
 
     if (!validSessionState(session)) {
@@ -593,33 +660,29 @@ class E2EClient {
     return session
   }
 
-  #extractPeerDevices(bundle) {
-    if (!Array.isArray(bundle?.devices)) {
-      return []
-    }
-
-    const devices = bundle.devices.filter((device) => validBundleDevice(device))
-
-    for (const device of devices) {
-      this.#markKnownPeerDevice(device.device_id)
-    }
-
-    return devices
+  #setSession(session) {
+    const key = this.#sessionKey(session.peerUserId, session.peerDeviceId)
+    this.#peerState.sessions[key] = session
   }
 
-  #markKnownPeerDevice(deviceId) {
-    const key = String(deviceId || "")
-    if (!key) {
-      return
+  #sessionsForUser(peerUserId) {
+    return Object.values(this.#peerState.sessions || {}).filter((session) => Number(session.peerUserId) === Number(peerUserId))
+  }
+
+  #knownDeviceIdsForUser(peerUserId) {
+    return uniqueStrings(this.#sessionsForUser(peerUserId).map((session) => session.peerDeviceId))
+  }
+
+  #extractBundleDevices(bundle) {
+    if (Array.isArray(bundle?.devices)) {
+      return bundle.devices.filter((device) => validBundleDevice(device))
     }
 
-    const nowIso = new Date().toISOString()
-
-    if (!this.#peerState.knownPeerDevices) {
-      this.#peerState.knownPeerDevices = {}
+    if (validBundleDevice(bundle?.device)) {
+      return [ bundle.device ]
     }
 
-    this.#peerState.knownPeerDevices[key] = nowIso
+    return []
   }
 
   async #loadOrCreateIdentity() {
@@ -684,20 +747,18 @@ class E2EClient {
 
     if (!validPeerState(existing)) {
       return {
-        version: 3,
+        version: 4,
         roomId: this.#roomId,
         peerUserId: this.#peerUserId,
-        sessions: {},
-        knownPeerDevices: {}
+        sessions: {}
       }
     }
 
     return {
-      version: 3,
+      version: 4,
       roomId: this.#roomId,
       peerUserId: this.#peerUserId,
-      sessions: normalizeSessions(existing.sessions),
-      knownPeerDevices: normalizeKnownPeerDevices(existing.knownPeerDevices)
+      sessions: normalizeSessions(existing.sessions)
     }
   }
 
@@ -769,9 +830,13 @@ class E2EClient {
     this.#persistDeviceState()
   }
 
-  async #fetchPrekeyBundle(knownDeviceIds = []) {
+  async #fetchPrekeyBundle(url, knownDeviceIds = []) {
+    if (!url) {
+      return null
+    }
+
     try {
-      const requestUrl = new URL(this.#prekeyBundleUrl, window.location.origin)
+      const requestUrl = new URL(url, window.location.origin)
       const normalizedKnownIds = uniqueStrings(knownDeviceIds)
 
       if (normalizedKnownIds.length > 0) {
@@ -924,7 +989,9 @@ function validSessionState(value) {
     value.baseRecvChainKey &&
     Number.isInteger(Number(value.sendCounter)) &&
     Number.isInteger(Number(value.recvCounter)) &&
-    typeof value.skippedKeys === "object"
+    typeof value.skippedKeys === "object" &&
+    value.peerUserId &&
+    value.peerDeviceId
   )
 }
 
@@ -940,15 +1007,20 @@ function validPeerState(value) {
 function normalizeSessions(input) {
   const sessions = {}
 
-  for (const [ peerDeviceId, session ] of Object.entries(input || {})) {
+  for (const [ key, session ] of Object.entries(input || {})) {
     if (!validSessionState(session)) {
       continue
     }
 
-    sessions[String(peerDeviceId)] = {
+    const peerUserId = Number(session.peerUserId)
+    const peerDeviceId = String(session.peerDeviceId || key)
+    const normalizedKey = `${peerUserId}:${peerDeviceId}`
+
+    sessions[normalizedKey] = {
       ...session,
-      version: Number(session.version || 3),
-      peerDeviceId: String(session.peerDeviceId || peerDeviceId),
+      version: Number(session.version || 4),
+      peerUserId,
+      peerDeviceId,
       sendCounter: Number(session.sendCounter),
       recvCounter: Number(session.recvCounter),
       skippedKeys: { ...(session.skippedKeys || {}) },
@@ -972,18 +1044,6 @@ function normalizeBootstrap(bootstrap) {
     pending: Boolean(bootstrap.pending),
     header: bootstrap.header || null
   }
-}
-
-function normalizeKnownPeerDevices(value) {
-  const normalized = {}
-
-  for (const [ deviceId, seenAt ] of Object.entries(value || {})) {
-    if (deviceId) {
-      normalized[String(deviceId)] = typeof seenAt === "string" ? seenAt : new Date().toISOString()
-    }
-  }
-
-  return normalized
 }
 
 function validBundleDevice(device) {
@@ -1158,6 +1218,19 @@ function encodeAad(payload) {
     ]))
   }
 
+  if (version < 3) {
+    return textEncoder.encode(JSON.stringify([
+      payload.v,
+      payload.alg,
+      payload.from,
+      payload.to,
+      payload.from_device_id,
+      payload.sender_device_id,
+      payload.recipient_device_id,
+      payload.c
+    ]))
+  }
+
   return textEncoder.encode(JSON.stringify([
     payload.v,
     payload.alg,
@@ -1165,6 +1238,7 @@ function encodeAad(payload) {
     payload.to,
     payload.from_device_id,
     payload.sender_device_id,
+    payload.recipient_user_id,
     payload.recipient_device_id,
     payload.c
   ]))

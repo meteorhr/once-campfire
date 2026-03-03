@@ -50,40 +50,32 @@
   <%= profile_form_with @user do |form| %>
     <div class="flex flex-column gap">
       <div class="flex align-center gap">
-        <%= translation_button(:user_name) %>
-
         <label class="flex align-center gap flex-item-grow input input--actor">
-          <%= form.text_field :name, class: "input txt-large ", autocomplete: "name", placeholder: "Enter your name",
+          <%= form.text_field :name, class: "input txt-large ", autocomplete: "name", placeholder: translation_hint(:user_name),
                 autofocus: true, required: true,  data: { "1p-ignore": true } %>
           <%= image_tag "person.svg", aria: { hidden: "true" }, size: 24, class: "colorize--black" %>
         </label>
       </div>
 
       <div class="flex align-center gap">
-        <%= translation_button(:email_address) %>
-
         <label class="flex align-center gap flex-item-grow input input--actor">
           <%= form.email_field :email_address, class: "input txt-large", value: @user.email_address, autocomplete: "username",
-                placeholder: "Enter your email address", required: false %>
+                placeholder: translation_hint(:email_address), required: false %>
           <%= image_tag "email.svg", aria: { hidden: "true" }, size: 24, class: "colorize--black" %>
         </label>
       </div>
 
       <div class="flex align-center gap">
-        <%= translation_button(:update_password) %>
-
         <label class="flex align-center gap flex-item-grow input input--actor">
-          <%= form.password_field :password, class: "input txt-large", autocomplete: "new-password", placeholder: "Change password",
+          <%= form.password_field :password, class: "input txt-large", autocomplete: "new-password", placeholder: translation_hint(:update_password),
                 required: false, maxlength: 72 %>
           <%= image_tag "password.svg", aria: { hidden: "true" }, size: 24, class: "colorize--black" %>
         </label>
       </div>
 
       <div class="flex align-start gap">
-        <%= translation_button(:bio) %>
-
         <label class="flex align--center gap flex-item--grow input input--actor">
-          <%= form.text_area :bio, class: "input txt-large", placeholder: "A few words about yourself…", maxlength: 200,
+          <%= form.text_area :bio, class: "input txt-large", placeholder: translation_hint(:bio), maxlength: 200,
                 rows: 3, required: false %>
           <%= image_tag "bio.svg", aria: { hidden: "true" }, size: 24, class: "colorize--black" %>
         </label>

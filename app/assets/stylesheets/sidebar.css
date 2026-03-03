@@ -129,6 +129,7 @@
 }
 
 .direct {
+  border: 0;
   border-radius: 0.3em;
   box-shadow: none;
   color: var(--color-text);
@@ -228,20 +229,40 @@
       box-shadow: 0 0 0 1px var(--color-text);
     }
   }
+
+  &:focus-within,
+  &:where(:not(:active)):focus-visible {
+    outline: 0;
+  }
 }
 
-.room.room--current,
-.direct.room--current {
-  --btn-border-color: var(--color-selected-dark);
-  --hover-color: var(--color-selected-dark);
+.room.room--current {
+  --btn-border-color: #000;
+  --hover-color: #000;
 
-  background-color: var(--color-selected);
-  box-shadow: 0 0 0 1px var(--color-selected-dark);
+  box-shadow: none;
+  font-weight: 700;
+}
+
+.room.room--current {
+  background-color: var(--color-text-reversed);
+}
+
+.direct.room--current {
+  --btn-border-color: transparent;
+  --hover-color: var(--color-border-darker);
+
+  border: 0;
+  box-shadow: none;
+  background-color: transparent;
+  font-weight: normal;
+}
+
+.direct.room--current .direct__author {
   font-weight: 700;
 }
 
 .room--current {
-  --btn-border-radius: 0.5em;
   --hover-filter: none;
   --num-buttons: 1;
 

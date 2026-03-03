@@ -3,11 +3,10 @@
 <div class="panel center">
   <header>
     <h1 class="txt-x-large txt-tight-lines txt-align-center margin-none-block-start margin-block-end">
-      Upgrade to a supported web browser
+      <%= translation_hint(:incompatible_browser_title) %>
     </h1>
     <div class="flex align-start gap">
-      <%= translation_button(:incompatible_browser_messsage) %>
-      <p class="margin-none-block-start">Campfire requires a modern web browser. Please use one of the browsers listed below and make sure auto-updates are enabled.</p>
+      <p class="margin-none-block-start"><%= translation_hint(:incompatible_browser_body) %></p>
     </div>
   </header>
 

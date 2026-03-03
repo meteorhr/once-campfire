@@ -16,5 +16,7 @@ module Campfire
 
     # Fallback to English if translation key is missing
     config.i18n.fallbacks = true
+    config.i18n.available_locales = [ :en, :es, :fr, :hi, :de, :"pt-BR", :ja, :ru ]
+    config.i18n.default_locale = :en
   end
 end

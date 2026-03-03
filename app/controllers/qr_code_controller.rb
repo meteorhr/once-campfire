@@ -3,7 +3,11 @@ class QrCodeController < ApplicationController
 
   def show
     url = Base64.urlsafe_decode64(params[:id])
-    qr_code = RQRCode::QRCode.new(url).as_svg(viewbox: true, fill: :white, color: :black)
+    qr_code = RQRCode::QRCode.new(url).as_svg(
+      viewbox: true,
+      fill: "ffffff",
+      color: "000000"
+    )
 
     expires_in 1.year, public: true
     render plain: qr_code, content_type: "image/svg+xml"
